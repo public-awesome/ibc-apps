@@ -7,15 +7,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/CosmWasm/wasmd/x/wasm"
-	wasmkeeper "github.com/CosmWasm/wasmd/x/wasm/keeper"
-	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
-	ibchooks "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7"
-	ibchookskeeper "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/keeper"
-	ibchookstypes "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/types"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/spf13/cast"
-
 	storetypes "cosmossdk.io/store/types"
 	"cosmossdk.io/x/evidence"
 	evidencekeeper "cosmossdk.io/x/evidence/keeper"
@@ -29,6 +20,9 @@ import (
 	"cosmossdk.io/x/upgrade"
 	upgradekeeper "cosmossdk.io/x/upgrade/keeper"
 	upgradetypes "cosmossdk.io/x/upgrade/types"
+	"github.com/CosmWasm/wasmd/x/wasm"
+	wasmkeeper "github.com/CosmWasm/wasmd/x/wasm/keeper"
+	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	"github.com/cosmos/cosmos-sdk/baseapp"
 	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/client/grpc/cmtservice"
@@ -39,6 +33,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/server/api"
 	"github.com/cosmos/cosmos-sdk/server/config"
 	servertypes "github.com/cosmos/cosmos-sdk/server/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/module"
 	"github.com/cosmos/cosmos-sdk/version"
@@ -47,6 +42,13 @@ import (
 	authkeeper "github.com/cosmos/cosmos-sdk/x/auth/keeper"
 	authsim "github.com/cosmos/cosmos-sdk/x/auth/simulation"
 	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
+	ibchooks "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7"
+	ibchookskeeper "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/keeper"
+	ibchookstypes "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/types"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/spf13/cast"
+
+	authcodec "github.com/cosmos/cosmos-sdk/x/auth/codec"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	"github.com/cosmos/cosmos-sdk/x/auth/vesting"
 	vestingtypes "github.com/cosmos/cosmos-sdk/x/auth/vesting/types"
@@ -293,12 +295,14 @@ func NewSimApp(
 	app.keys[authtypes.StoreKey] = storetypes.NewKVStoreKey(authtypes.StoreKey)
 	app.AuthKeeper = authkeeper.NewAccountKeeper(
 		cdc,
-		app.keys[authtypes.StoreKey],
+		runtime.NewKVStoreService(app.keys[authtypes.StoreKey]),
 		authtypes.ProtoBaseAccount,
 		make(map[string][]string), // This will be populated by each module later
+		authcodec.NewBech32Codec(AccountAddressPrefix),
 		AccountAddressPrefix,
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
 	)
+
 	defer func() { // TODO: Does deferring this even work?
 		app.AuthKeeper.GetModulePermissions()[authtypes.FeeCollectorName] = authtypes.NewPermissionsForAddress(authtypes.FeeCollectorName, nil) // This implicitly creates a module account
 		app.BankKeeper.GetBlockedAddresses()[authtypes.NewModuleAddress(authtypes.FeeCollectorName).String()] = true
@@ -311,10 +315,11 @@ func NewSimApp(
 	app.keys[banktypes.StoreKey] = storetypes.NewKVStoreKey(banktypes.StoreKey)
 	app.BankKeeper = bankkeeper.NewBaseKeeper(
 		cdc,
-		app.keys[banktypes.StoreKey],
+		runtime.NewKVStoreService(app.keys[banktypes.StoreKey]),
 		app.AuthKeeper,
 		make(map[string]bool),
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
+		logger,
 	)
 	modules = append(modules, bank.NewAppModule(cdc, app.BankKeeper, app.AuthKeeper, nil))
 	simModules = append(simModules, bank.NewAppModule(cdc, app.BankKeeper, app.AuthKeeper, nil))
@@ -324,7 +329,7 @@ func NewSimApp(
 	// 2. 'bank'
 	app.keys[authzkeeper.StoreKey] = storetypes.NewKVStoreKey(authzkeeper.StoreKey)
 	app.AuthzKeeper = authzkeeper.NewKeeper(
-		app.keys[authzkeeper.StoreKey],
+		runtime.NewKVStoreService(app.keys[authzkeeper.StoreKey]),
 		cdc,
 		app.MsgServiceRouter(),
 		app.AuthKeeper,
@@ -348,10 +353,11 @@ func NewSimApp(
 	app.keys[consensustypes.StoreKey] = storetypes.NewKVStoreKey(consensustypes.StoreKey)
 	app.ConsensusParamsKeeper = consensuskeeper.NewKeeper(
 		cdc,
-		app.keys[consensustypes.StoreKey],
+		runtime.NewKVStoreService(app.keys[consensustypes.StoreKey]),
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
+		runtime.EventService{},
 	)
-	app.SetParamStore(&app.ConsensusParamsKeeper)
+	app.SetParamStore(app.ConsensusParamsKeeper.ParamsStore)
 	modules = append(modules, consensus.NewAppModule(cdc, app.ConsensusParamsKeeper))
 
 	// 'crisis' module - depends on
@@ -359,11 +365,12 @@ func NewSimApp(
 	app.keys[crisistypes.StoreKey] = storetypes.NewKVStoreKey(crisistypes.StoreKey)
 	app.CrisisKeeper = crisiskeeper.NewKeeper(
 		cdc,
-		app.keys[crisistypes.StoreKey],
+		runtime.NewKVStoreService(app.keys[crisistypes.StoreKey]),
 		invCheckPeriod,
 		app.BankKeeper,
 		authtypes.FeeCollectorName,
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
+		app.AuthKeeper.AddressCodec(),
 	)
 	modules = append(modules, crisis.NewAppModule(app.CrisisKeeper, false, nil)) // Never skip invariant checks on genesis
 	defer func() { app.ModuleManager.RegisterInvariants(app.CrisisKeeper) }()
@@ -374,7 +381,7 @@ func NewSimApp(
 	app.keys[feegrant.StoreKey] = storetypes.NewKVStoreKey(feegrant.StoreKey)
 	app.FeeGrantKeeper = feegrantkeeper.NewKeeper(
 		cdc,
-		app.keys[feegrant.StoreKey],
+		runtime.NewKVStoreService(app.keys[feegrant.StoreKey]),
 		app.AuthKeeper,
 	)
 	modules = append(modules, feegrantmodule.NewAppModule(cdc, app.AuthKeeper, app.BankKeeper, app.FeeGrantKeeper, interfaceRegistry))
@@ -404,10 +411,12 @@ func NewSimApp(
 	app.keys[stakingtypes.StoreKey] = storetypes.NewKVStoreKey(stakingtypes.StoreKey)
 	app.StakingKeeper = stakingkeeper.NewKeeper(
 		cdc,
-		app.keys[stakingtypes.StoreKey],
+		runtime.NewKVStoreService(app.keys[stakingtypes.StoreKey]),
 		app.AuthKeeper,
 		app.BankKeeper,
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
+		authcodec.NewBech32Codec(AccountAddressPrefix),
+		authcodec.NewBech32Codec(AccountAddressPrefix),
 	)
 	stakingHooks := make([]stakingtypes.StakingHooks, 0)
 	defer func() { app.StakingKeeper.SetHooks(stakingtypes.NewMultiStakingHooks(stakingHooks...)) }()
@@ -423,7 +432,7 @@ func NewSimApp(
 	app.keys[minttypes.StoreKey] = storetypes.NewKVStoreKey(minttypes.StoreKey)
 	app.MintKeeper = mintkeeper.NewKeeper(
 		cdc,
-		app.keys[minttypes.StoreKey],
+		runtime.NewKVStoreService(app.keys[minttypes.StoreKey]),
 		app.StakingKeeper,
 		app.AuthKeeper,
 		app.BankKeeper,
@@ -440,7 +449,7 @@ func NewSimApp(
 	app.BankKeeper.GetBlockedAddresses()[authtypes.NewModuleAddress(nft.ModuleName).String()] = true
 	app.keys[nftkeeper.StoreKey] = storetypes.NewKVStoreKey(nftkeeper.StoreKey)
 	app.NftKeeper = nftkeeper.NewKeeper(
-		app.keys[nftkeeper.StoreKey],
+		runtime.NewKVStoreService(app.keys[nftkeeper.StoreKey]),
 		cdc,
 		app.AuthKeeper,
 		app.BankKeeper,
@@ -451,7 +460,7 @@ func NewSimApp(
 	// 'genutil' module - depends on
 	// 1. 'auth'
 	// 2. 'staking'
-	modules = append(modules, genutil.NewAppModule(app.AuthKeeper, app.StakingKeeper, app.BaseApp.DeliverTx, encodingConfig.TxConfig))
+	modules = append(modules, genutil.NewAppModule(app.AuthKeeper, app.StakingKeeper, app, encodingConfig.TxConfig))
 
 	// 'vesting' module - depends on
 	// 1. 'auth'
@@ -466,13 +475,13 @@ func NewSimApp(
 	app.SlashingKeeper = slashingkeeper.NewKeeper(
 		cdc,
 		encodingConfig.Amino,
-		app.keys[slashingtypes.StoreKey],
+		runtime.NewKVStoreService(app.keys[slashingtypes.StoreKey]),
 		app.StakingKeeper,
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
 	)
 	stakingHooks = append(stakingHooks, app.SlashingKeeper.Hooks())
-	modules = append(modules, slashing.NewAppModule(cdc, app.SlashingKeeper, app.AuthKeeper, app.BankKeeper, app.StakingKeeper, nil))
-	simModules = append(simModules, slashing.NewAppModule(cdc, app.SlashingKeeper, app.AuthKeeper, app.BankKeeper, app.StakingKeeper, nil))
+	modules = append(modules, slashing.NewAppModule(cdc, app.SlashingKeeper, app.AuthKeeper, app.BankKeeper, app.StakingKeeper, nil, app.interfaceRegistry))
+	simModules = append(simModules, slashing.NewAppModule(cdc, app.SlashingKeeper, app.AuthKeeper, app.BankKeeper, app.StakingKeeper, nil, app.interfaceRegistry))
 
 	// 'gov' module - depends on
 	// 1. 'auth'
@@ -482,10 +491,11 @@ func NewSimApp(
 	app.keys[govtypes.StoreKey] = storetypes.NewKVStoreKey(govtypes.StoreKey)
 	app.GovKeeper = *govkeeper.NewKeeper(
 		cdc,
-		app.keys[govtypes.StoreKey],
+		runtime.NewKVStoreService(app.keys[govtypes.StoreKey]),
 		app.AuthKeeper,
 		app.BankKeeper,
 		app.StakingKeeper,
+		app.DistrKeeper,
 		app.MsgServiceRouter(),
 		govtypes.DefaultConfig(),
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
@@ -507,7 +517,7 @@ func NewSimApp(
 	app.keys[distrtypes.StoreKey] = storetypes.NewKVStoreKey(distrtypes.StoreKey)
 	app.DistrKeeper = distrkeeper.NewKeeper(
 		cdc,
-		app.keys[distrtypes.StoreKey],
+		runtime.NewKVStoreService(app.keys[distrtypes.StoreKey]),
 		app.AuthKeeper,
 		app.BankKeeper,
 		app.StakingKeeper,
@@ -538,9 +548,11 @@ func NewSimApp(
 	app.keys[evidencetypes.StoreKey] = storetypes.NewKVStoreKey(evidencetypes.StoreKey)
 	app.EvidenceKeeper = *evidencekeeper.NewKeeper(
 		cdc,
-		app.keys[evidencetypes.StoreKey],
+		runtime.NewKVStoreService(app.keys[evidencetypes.StoreKey]),
 		app.StakingKeeper,
 		app.SlashingKeeper,
+		app.AuthKeeper.AddressCodec(),
+		runtime.ProvideCometInfoService(),
 	)
 	modules = append(modules, evidence.NewAppModule(app.EvidenceKeeper))
 	simModules = append(simModules, evidence.NewAppModule(app.EvidenceKeeper))
@@ -550,14 +562,13 @@ func NewSimApp(
 	app.keys[upgradetypes.StoreKey] = storetypes.NewKVStoreKey(upgradetypes.StoreKey)
 	app.UpgradeKeeper = upgradekeeper.NewKeeper(
 		skipUpgradeHeights, // TODO: What is this?
-		app.keys[upgradetypes.StoreKey],
+		runtime.NewKVStoreService(app.keys[upgradetypes.StoreKey]),
 		cdc,
 		homePath,
 		app,
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
 	)
-	govLegacyRouter.AddRoute(upgradetypes.RouterKey, upgrade.NewSoftwareUpgradeProposalHandler(app.UpgradeKeeper))
-	modules = append(modules, upgrade.NewAppModule(app.UpgradeKeeper))
+	modules = append(modules, upgrade.NewAppModule(app.UpgradeKeeper, app.AuthKeeper.AddressCodec()))
 
 	// 'ibc' module - depends on
 	// 1. 'staking'
@@ -573,6 +584,7 @@ func NewSimApp(
 		app.StakingKeeper,
 		app.UpgradeKeeper,
 		app.CapabilityKeeper.ScopeToModule(ibcexported.ModuleName),
+		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
 	)
 	govLegacyRouter.AddRoute(ibcexported.RouterKey, ibcclient.NewClientProposalHandler(app.IBCKeeper.ClientKeeper))
 	modules = append(modules, ibc.NewAppModule(app.IBCKeeper))
@@ -588,7 +600,7 @@ func NewSimApp(
 		app.keys[ibcfeetypes.StoreKey],
 		app.IBCKeeper.ChannelKeeper,
 		app.IBCKeeper.ChannelKeeper,
-		&app.IBCKeeper.PortKeeper,
+		app.IBCKeeper.PortKeeper,
 		app.AuthKeeper,
 		app.BankKeeper,
 	)
@@ -637,10 +649,11 @@ func NewSimApp(
 		app.ParamsKeeper.Subspace(ibctransfertypes.ModuleName),
 		hooksICS4Wrapper,
 		app.IBCKeeper.ChannelKeeper,
-		&app.IBCKeeper.PortKeeper,
+		app.IBCKeeper.PortKeeper,
 		app.AuthKeeper,
 		app.BankKeeper,
 		app.CapabilityKeeper.ScopeToModule(ibctransfertypes.ModuleName),
+		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
 	)
 	modules = append(modules, ibctransfer.NewAppModule(app.TransferKeeper))
 	simModules = append(simModules, ibctransfer.NewAppModule(app.TransferKeeper))
@@ -659,9 +672,10 @@ func NewSimApp(
 		app.ParamsKeeper.Subspace(icacontrollertypes.SubModuleName),
 		app.IBCKeeper.ChannelKeeper, // may be replaced with middleware such as ics29 fee
 		app.IBCKeeper.ChannelKeeper,
-		&app.IBCKeeper.PortKeeper,
+		app.IBCKeeper.PortKeeper,
 		app.CapabilityKeeper.ScopeToModule(icacontrollertypes.SubModuleName),
 		app.MsgServiceRouter(),
+		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
 	)
 
 	// 'icahost' module - depends on
@@ -676,10 +690,11 @@ func NewSimApp(
 		app.ParamsKeeper.Subspace(icahosttypes.SubModuleName),
 		app.IBCKeeper.ChannelKeeper,
 		app.IBCKeeper.ChannelKeeper,
-		&app.IBCKeeper.PortKeeper,
+		app.IBCKeeper.PortKeeper,
 		app.AuthKeeper,
 		app.CapabilityKeeper.ScopeToModule(icahosttypes.SubModuleName),
 		app.MsgServiceRouter(),
+		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
 	)
 	// app.IBCKeeper.Router.AddRoute(icahosttypes.SubModuleName, icahost.NewIBCModule(app.ICAHostKeeper))
 	modules = append(modules, ica.NewAppModule(&icaControllerKeeper, &app.ICAHostKeeper))
@@ -703,13 +718,14 @@ func NewSimApp(
 	}
 	app.WasmKeeper = wasm.NewKeeper(
 		cdc,
-		app.keys[wasmtypes.StoreKey],
+		runtime.NewKVStoreService(app.keys[wasmtypes.StoreKey]),
 		app.AuthKeeper,
 		app.BankKeeper,
 		app.StakingKeeper,
 		distrkeeper.NewQuerier(app.DistrKeeper),
+		app.IBCFeeKeeper,
 		app.IBCKeeper.ChannelKeeper,
-		&app.IBCKeeper.PortKeeper,
+		app.IBCKeeper.PortKeeper,
 		app.CapabilityKeeper.ScopeToModule(wasm.ModuleName),
 		app.TransferKeeper,
 		app.MsgServiceRouter(),
@@ -720,7 +736,6 @@ func NewSimApp(
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
 		GetWasmOpts(app, appOpts)...,
 	)
-	govLegacyRouter.AddRoute(wasm.RouterKey, wasm.NewWasmProposalHandler(app.WasmKeeper, wasm.EnableAllProposals))
 	modules = append(modules, wasm.NewAppModule(cdc, &app.WasmKeeper, app.StakingKeeper, app.AuthKeeper, app.BankKeeper, app.MsgServiceRouter(), nil))
 	simModules = append(simModules, wasm.NewAppModule(cdc, &app.WasmKeeper, app.StakingKeeper, app.AuthKeeper, app.BankKeeper, app.MsgServiceRouter(), nil))
 	app.ContractKeeper = wasmkeeper.NewDefaultPermissionKeeper(&app.WasmKeeper)
@@ -847,6 +862,7 @@ func NewSimApp(
 	app.SetInitChainer(app.InitChainer)
 	app.SetBeginBlocker(app.BeginBlocker)
 
+	txCounterStoreKey := app.keys[wasmtypes.StoreKey]
 	anteHandler, err := NewAnteHandler(
 		HandlerOptions{
 			HandlerOptions: ante.HandlerOptions{
@@ -856,10 +872,10 @@ func NewSimApp(
 				FeegrantKeeper:  app.FeeGrantKeeper,
 				SigGasConsumer:  ante.DefaultSigVerificationGasConsumer,
 			},
-			IBCKeeper:         app.IBCKeeper,
-			TxCounterStoreKey: app.keys[wasmtypes.StoreKey],
-			WasmConfig:        wasmConfig,
-			Cdc:               cdc,
+			IBCKeeper:             app.IBCKeeper,
+			TXCounterStoreService: runtime.NewKVStoreService(txCounterStoreKey),
+			WasmConfig:            wasmConfig,
+			Cdc:                   cdc,
 		},
 	)
 	if err != nil {
@@ -893,17 +909,17 @@ func GetWasmOpts(app *App, appOpts servertypes.AppOptions) []wasm.Option {
 func (app *App) Name() string { return app.BaseApp.Name() }
 
 // BeginBlocker application updates every begin block
-func (app *App) BeginBlocker(ctx sdktypes.Context, req abcitypes.RequestBeginBlock) abcitypes.ResponseBeginBlock {
-	return app.ModuleManager.BeginBlock(ctx, req)
+func (app *App) BeginBlocker(ctx sdk.Context) (sdk.BeginBlock, error) {
+	return app.ModuleManager.BeginBlock(ctx)
 }
 
 // EndBlocker application updates every end block
-func (app *App) EndBlocker(ctx sdktypes.Context, req abcitypes.RequestEndBlock) abcitypes.ResponseEndBlock {
-	return app.ModuleManager.EndBlock(ctx, req)
+func (app *App) EndBlocker(ctx sdk.Context) (sdk.EndBlock, error) {
+	return app.ModuleManager.EndBlock(ctx)
 }
 
 // InitChainer application update at chain initialization
-func (app *App) InitChainer(ctx sdktypes.Context, req abcitypes.RequestInitChain) abcitypes.ResponseInitChain {
+func (app *App) InitChainer(ctx sdktypes.Context, req *abcitypes.RequestInitChain) (*abcitypes.ResponseInitChain, error) {
 	var genesisState GenesisState
 	if err := tmjson.Unmarshal(req.AppStateBytes, &genesisState); err != nil {
 		panic(err)
@@ -971,8 +987,8 @@ func (app *App) RegisterTendermintService(clientCtx client.Context) {
 	)
 }
 
-func (app *App) RegisterNodeService(clientCtx client.Context) {
-	node.RegisterNodeService(clientCtx, app.GRPCQueryRouter())
+func (app *App) RegisterNodeService(clientCtx client.Context, cfg config.Config) {
+	node.RegisterNodeService(clientCtx, app.GRPCQueryRouter(), cfg)
 }
 
 // SimulationManager implements the SimulationApp interface
