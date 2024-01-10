@@ -30,24 +30,31 @@ import (
 	"github.com/cosmos/cosmos-sdk/codec"
 	"github.com/cosmos/cosmos-sdk/codec/types"
 	"github.com/cosmos/cosmos-sdk/runtime"
+	"github.com/cosmos/cosmos-sdk/server"
 	"github.com/cosmos/cosmos-sdk/server/api"
 	"github.com/cosmos/cosmos-sdk/server/config"
 	servertypes "github.com/cosmos/cosmos-sdk/server/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/module"
+	"github.com/cosmos/cosmos-sdk/types/msgservice"
 	"github.com/cosmos/cosmos-sdk/version"
 	"github.com/cosmos/cosmos-sdk/x/auth"
 	"github.com/cosmos/cosmos-sdk/x/auth/ante"
 	authkeeper "github.com/cosmos/cosmos-sdk/x/auth/keeper"
+	"github.com/cosmos/cosmos-sdk/x/auth/posthandler"
 	authsim "github.com/cosmos/cosmos-sdk/x/auth/simulation"
 	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
+	"github.com/cosmos/gogoproto/proto"
 	ibchooks "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7"
 	ibchookskeeper "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/keeper"
 	ibchookstypes "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cast"
 
+	"cosmossdk.io/x/circuit"
+	circuitkeeper "cosmossdk.io/x/circuit/keeper"
+	circuittypes "cosmossdk.io/x/circuit/types"
 	authcodec "github.com/cosmos/cosmos-sdk/x/auth/codec"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	"github.com/cosmos/cosmos-sdk/x/auth/vesting"
@@ -95,6 +102,7 @@ import (
 	capabilitykeeper "github.com/cosmos/ibc-go/modules/capability/keeper"
 	capabilitytypes "github.com/cosmos/ibc-go/modules/capability/types"
 
+	abci "github.com/cometbft/cometbft/abci/types"
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	tmjson "github.com/cometbft/cometbft/libs/json"
 	dbm "github.com/cosmos/cosmos-db"
@@ -125,14 +133,14 @@ import (
 // DO NOT change the names of these variables!
 // TODO: to prevent other users from changing these variables, we could probably just publish our own package like https://pkg.go.dev/github.com/cosmos/cosmos-sdk/version
 var (
-	AccountAddressPrefix       = "feath"
-	AccountPubKeyPrefix        = "feathpub"
-	ValidatorAddressPrefix     = "feathvaloper"
-	ValidatorPubKeyPrefix      = "feathvaloperpub"
-	ConsensusNodeAddressPrefix = "feathvalcons"
-	ConsensusNodePubKeyPrefix  = "feathvalconspub"
-	BondDenom                  = "featherstake"
-	AppName                    = "feather-core"
+	// AccountAddressPrefix       = "feath"
+	// AccountPubKeyPrefix        = "feathpub"
+	// ValidatorAddressPrefix     = "feathvaloper"
+	// ValidatorPubKeyPrefix      = "feathvaloperpub"
+	// ConsensusNodeAddressPrefix = "feathvalcons"
+	// ConsensusNodePubKeyPrefix  = "feathvalconspub"
+	BondDenom = "featherstake"
+	AppName   = "feather-core"
 )
 
 // TODO: What is this?
@@ -146,6 +154,22 @@ func getGovProposalHandlers() []govclient.ProposalHandler {
 	)
 
 	return govProposalHandlers
+}
+
+// module account permissions
+var maccPerms = map[string][]string{
+	authtypes.FeeCollectorName:     nil,
+	distrtypes.ModuleName:          nil,
+	minttypes.ModuleName:           {authtypes.Minter},
+	stakingtypes.BondedPoolName:    {authtypes.Burner, authtypes.Staking},
+	stakingtypes.NotBondedPoolName: {authtypes.Burner, authtypes.Staking},
+	govtypes.ModuleName:            {authtypes.Burner},
+	nft.ModuleName:                 nil,
+	// non sdk modules
+	ibctransfertypes.ModuleName: {authtypes.Minter, authtypes.Burner},
+	ibcfeetypes.ModuleName:      nil,
+	icatypes.ModuleName:         nil,
+	wasmtypes.ModuleName:        {authtypes.Burner},
 }
 
 var (
@@ -181,7 +205,7 @@ var (
 		ibcfee.AppModuleBasic{},
 		ibchooks.AppModuleBasic{},
 		wasm.AppModuleBasic{},
-		ibctm.AppModuleBasic{},
+		ibctm.AppModule{},
 	)
 )
 
@@ -215,7 +239,7 @@ type App struct {
 	// keepers
 	AuthKeeper            authkeeper.AccountKeeper // TODO: Do we even need to store this state?
 	AuthzKeeper           authzkeeper.Keeper
-	BankKeeper            bankkeeper.Keeper
+	BankKeeper            bankkeeper.BaseKeeper
 	CapabilityKeeper      *capabilitykeeper.Keeper
 	StakingKeeper         *stakingkeeper.Keeper
 	SlashingKeeper        slashingkeeper.Keeper
@@ -236,12 +260,14 @@ type App struct {
 	ConsensusParamsKeeper consensuskeeper.Keeper
 	IBCFeeKeeper          ibcfeekeeper.Keeper
 	ContractKeeper        wasmtypes.ContractOpsKeeper
+	CircuitKeeper         circuitkeeper.Keeper
 
 	// IBC hooks
 	IBCHooksKeeper ibchookskeeper.Keeper
 
 	// ModuleManager is the module manager
-	ModuleManager *module.Manager
+	ModuleManager      *module.Manager
+	BasicModuleManager module.BasicManager
 
 	// sm is the simulation manager
 	sm           *module.SimulationManager
@@ -297,9 +323,9 @@ func NewSimApp(
 		cdc,
 		runtime.NewKVStoreService(app.keys[authtypes.StoreKey]),
 		authtypes.ProtoBaseAccount,
-		make(map[string][]string), // This will be populated by each module later
-		authcodec.NewBech32Codec(AccountAddressPrefix),
-		AccountAddressPrefix,
+		maccPerms,
+		authcodec.NewBech32Codec(sdk.GetConfig().GetBech32AccountAddrPrefix()),
+		sdk.GetConfig().GetBech32AccountAddrPrefix(),
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
 	)
 
@@ -317,7 +343,7 @@ func NewSimApp(
 		cdc,
 		runtime.NewKVStoreService(app.keys[banktypes.StoreKey]),
 		app.AuthKeeper,
-		make(map[string]bool),
+		BlockedAddresses(),
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
 		logger,
 	)
@@ -348,6 +374,17 @@ func NewSimApp(
 	defer app.CapabilityKeeper.Seal()
 	modules = append(modules, capability.NewAppModule(cdc, *app.CapabilityKeeper, false)) // TODO: Find out what is sealkeeper
 	simModules = append(simModules, capability.NewAppModule(cdc, *app.CapabilityKeeper, false))
+
+	// 'circuit' module
+	app.keys[circuittypes.StoreKey] = storetypes.NewKVStoreKey(circuittypes.StoreKey)
+	app.CircuitKeeper = circuitkeeper.NewKeeper(
+		cdc,
+		runtime.NewKVStoreService(app.keys[circuittypes.StoreKey]),
+		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
+		app.AuthKeeper.AddressCodec(),
+	)
+	app.BaseApp.SetCircuitBreaker(&app.CircuitKeeper)
+	modules = append(modules, circuit.NewAppModule(cdc, app.CircuitKeeper))
 
 	// 'consensus' module
 	app.keys[consensustypes.StoreKey] = storetypes.NewKVStoreKey(consensustypes.StoreKey)
@@ -415,8 +452,8 @@ func NewSimApp(
 		app.AuthKeeper,
 		app.BankKeeper,
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
-		authcodec.NewBech32Codec(AccountAddressPrefix),
-		authcodec.NewBech32Codec(AccountAddressPrefix),
+		authcodec.NewBech32Codec(sdk.GetConfig().GetBech32AccountAddrPrefix()),
+		authcodec.NewBech32Codec(sdk.GetConfig().GetBech32AccountAddrPrefix()),
 	)
 	stakingHooks := make([]stakingtypes.StakingHooks, 0)
 	defer func() { app.StakingKeeper.SetHooks(stakingtypes.NewMultiStakingHooks(stakingHooks...)) }()
@@ -460,7 +497,7 @@ func NewSimApp(
 	// 'genutil' module - depends on
 	// 1. 'auth'
 	// 2. 'staking'
-	modules = append(modules, genutil.NewAppModule(app.AuthKeeper, app.StakingKeeper, app, encodingConfig.TxConfig))
+	modules = append(modules, genutil.NewAppModule(app.AuthKeeper, app.StakingKeeper, app, txConfig))
 
 	// 'vesting' module - depends on
 	// 1. 'auth'
@@ -588,6 +625,7 @@ func NewSimApp(
 	)
 	govLegacyRouter.AddRoute(ibcexported.RouterKey, ibcclient.NewClientProposalHandler(app.IBCKeeper.ClientKeeper))
 	modules = append(modules, ibc.NewAppModule(app.IBCKeeper))
+	modules = append(modules, ibctm.AppModule{})
 	simModules = append(simModules, ibc.NewAppModule(app.IBCKeeper))
 
 	// 'ibcfeekeeper' module - depends on
@@ -629,7 +667,7 @@ func NewSimApp(
 	app.IBCHooksKeeper = ibchookskeeper.NewKeeper(
 		app.keys[ibchookstypes.StoreKey],
 	)
-	ics20WasmHooks := ibchooks.NewWasmHooks(&app.IBCHooksKeeper, nil, AccountAddressPrefix) // The contract keeper needs to be set later
+	ics20WasmHooks := ibchooks.NewWasmHooks(&app.IBCHooksKeeper, nil, sdk.GetConfig().GetBech32AccountAddrPrefix()) // The contract keeper needs to be set later
 	hooksICS4Wrapper := ibchooks.NewICS4Middleware(
 		app.IBCKeeper.ChannelKeeper,
 		ics20WasmHooks,
@@ -747,13 +785,27 @@ func NewSimApp(
 
 	app.ModuleManager = module.NewManager(modules...)
 
+	app.BasicModuleManager = module.NewBasicManagerFromManager(
+		app.ModuleManager,
+		map[string]module.AppModuleBasic{
+			genutiltypes.ModuleName: genutil.NewAppModuleBasic(genutiltypes.DefaultMessageValidator),
+			govtypes.ModuleName:     gov.NewAppModuleBasic([]govclient.ProposalHandler{paramsclient.ProposalHandler}),
+			ibctm.ModuleName:        ibctm.AppModuleBasic{},
+		},
+	)
+	app.BasicModuleManager.RegisterLegacyAminoCodec(legacyAmino)
+	app.BasicModuleManager.RegisterInterfaces(interfaceRegistry)
+
+	// NOTE: upgrade module is required to be prioritized
+	app.ModuleManager.SetOrderPreBlockers(
+		upgradetypes.ModuleName,
+	)
+
 	// During begin block slashing happens after distr.BeginBlocker so that
 	// there is nothing left over in the validator fee pool, so as to keep the
 	// CanWithdrawInvariant invariant.
 	// NOTE: staking module is required if HistoricalEntries param > 0
 	app.ModuleManager.SetOrderBeginBlockers(
-		// upgrades should be run first
-		upgradetypes.ModuleName,
 		capabilitytypes.ModuleName,
 		minttypes.ModuleName,
 		consensustypes.ModuleName,
@@ -841,6 +893,7 @@ func NewSimApp(
 		ibcfeetypes.ModuleName,
 		ibchookstypes.ModuleName,
 		wasm.ModuleName,
+		circuittypes.ModuleName,
 		// this line is used by starport scaffolding # stargate/app/initGenesis
 	)
 
@@ -848,7 +901,10 @@ func NewSimApp(
 	// app.mm.SetOrderMigrations(custom order)
 
 	app.configurator = module.NewConfigurator(cdc, app.MsgServiceRouter(), app.GRPCQueryRouter())
-	app.ModuleManager.RegisterServices(app.configurator)
+	err = app.ModuleManager.RegisterServices(app.configurator)
+	if err != nil {
+		panic(err)
+	}
 
 	app.MountKVStores(app.keys)
 	app.MountTransientStores(tkeys)
@@ -860,6 +916,7 @@ func NewSimApp(
 
 	// initialize BaseApp
 	app.SetInitChainer(app.InitChainer)
+	app.SetPreBlocker(app.PreBlocker)
 	app.SetBeginBlocker(app.BeginBlocker)
 
 	txCounterStoreKey := app.keys[wasmtypes.StoreKey]
@@ -876,6 +933,7 @@ func NewSimApp(
 			TXCounterStoreService: runtime.NewKVStoreService(txCounterStoreKey),
 			WasmConfig:            wasmConfig,
 			Cdc:                   cdc,
+			CircuitKeeper:         &app.CircuitKeeper,
 		},
 	)
 	if err != nil {
@@ -884,6 +942,28 @@ func NewSimApp(
 
 	app.SetAnteHandler(anteHandler)
 	app.SetEndBlocker(app.EndBlocker)
+
+	postHandler, err := posthandler.NewPostHandler(
+		posthandler.HandlerOptions{},
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	app.SetPostHandler(postHandler)
+
+	// At startup, after all modules have been registered, check that all proto
+	// annotations are correct.
+	protoFiles, err := proto.MergedRegistry()
+	if err != nil {
+		panic(err)
+	}
+	err = msgservice.ValidateProtoAnnotations(protoFiles)
+	if err != nil {
+		// Once we switch to using protoreflect-based antehandlers, we might
+		// want to panic here instead of logging a warning.
+		_, _ = fmt.Fprintln(os.Stderr, err.Error())
+	}
 
 	if loadLatest {
 		if err := app.LoadLatestVersion(); err != nil {
@@ -908,6 +988,10 @@ func GetWasmOpts(app *App, appOpts servertypes.AppOptions) []wasm.Option {
 // Name returns the name of the App
 func (app *App) Name() string { return app.BaseApp.Name() }
 
+func (app *App) PreBlocker(ctx sdk.Context, _ *abci.RequestFinalizeBlock) (*sdk.ResponsePreBlock, error) {
+	return app.ModuleManager.PreBlock(ctx)
+}
+
 // BeginBlocker application updates every begin block
 func (app *App) BeginBlocker(ctx sdk.Context) (sdk.BeginBlock, error) {
 	return app.ModuleManager.BeginBlock(ctx)
@@ -924,7 +1008,10 @@ func (app *App) InitChainer(ctx sdktypes.Context, req *abcitypes.RequestInitChai
 	if err := tmjson.Unmarshal(req.AppStateBytes, &genesisState); err != nil {
 		panic(err)
 	}
-	app.UpgradeKeeper.SetModuleVersionMap(ctx, app.ModuleManager.GetVersionMap())
+	err := app.UpgradeKeeper.SetModuleVersionMap(ctx, app.ModuleManager.GetVersionMap())
+	if err != nil {
+		panic(err)
+	}
 	return app.ModuleManager.InitGenesis(ctx, app.cdc, genesisState)
 }
 
@@ -969,7 +1056,7 @@ func (app *App) RegisterAPIRoutes(apiSvr *api.Server, apiConfig config.APIConfig
 	cmtservice.RegisterGRPCGatewayRoutes(clientCtx, apiSvr.GRPCGatewayRouter)
 
 	// Register grpc-gateway routes for all modules.
-	ModuleBasics.RegisterGRPCGatewayRoutes(clientCtx, apiSvr.GRPCGatewayRouter)
+	app.BasicModuleManager.RegisterGRPCGatewayRoutes(clientCtx, apiSvr.GRPCGatewayRouter)
 }
 
 // RegisterTxService implements the Application.RegisterTxService method.
@@ -979,11 +1066,12 @@ func (app *App) RegisterTxService(clientCtx client.Context) {
 
 // RegisterTendermintService implements the Application.RegisterTendermintService method.
 func (app *App) RegisterTendermintService(clientCtx client.Context) {
+	cmtApp := server.NewCometABCIWrapper(app)
 	cmtservice.RegisterTendermintService(
 		clientCtx,
 		app.BaseApp.GRPCQueryRouter(),
 		app.interfaceRegistry,
-		app.Query,
+		cmtApp.Query,
 	)
 }
 
@@ -999,4 +1087,17 @@ func (app *App) SimulationManager() *module.SimulationManager {
 // DefaultGenesis returns a default genesis from the registered AppModuleBasic's.
 func (app *App) DefaultGenesis() map[string]json.RawMessage {
 	return ModuleBasics.DefaultGenesis(app.cdc)
+}
+
+// BlockedAddresses returns all the app's blocked account addresses.
+func BlockedAddresses() map[string]bool {
+	modAccAddrs := make(map[string]bool)
+	for acc := range maccPerms {
+		modAccAddrs[authtypes.NewModuleAddress(acc).String()] = true
+	}
+
+	// allow the following addresses to receive funds
+	delete(modAccAddrs, authtypes.NewModuleAddress(govtypes.ModuleName).String())
+
+	return modAccAddrs
 }

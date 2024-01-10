@@ -37,6 +37,8 @@ import (
 	simcli "github.com/cosmos/cosmos-sdk/x/simulation/client/cli"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 
+	slashingtypes "github.com/cosmos/cosmos-sdk/x/slashing/types"
+
 	abci "github.com/cometbft/cometbft/abci/types"
 	tmjson "github.com/cometbft/cometbft/libs/json"
 	dbm "github.com/cosmos/cosmos-db"
@@ -246,22 +248,25 @@ func SetupWithGenesisValSet(t *testing.T, valSet *tmtypes.ValidatorSet, genAccs 
 	// init chain will set the validator set and initialize the genesis accounts
 	consensusParams := simtestutil.DefaultConsensusParams
 	consensusParams.Block.MaxGas = 100 * simtestutil.DefaultGenTxGas
-	app.InitChain(
+	_, err = app.InitChain(
 		&abci.RequestInitChain{
 			ChainId:         chainID,
+			Time:            time.Now().UTC(),
 			Validators:      []abci.ValidatorUpdate{},
 			ConsensusParams: consensusParams,
+			InitialHeight:   app.LastBlockHeight() + 1,
 			AppStateBytes:   stateBytes,
 		},
 	)
+	require.NoError(t, err)
 	// commit genesis changes
 	app.Commit()
 	_, err = app.FinalizeBlock(&abci.RequestFinalizeBlock{
 		Height:             app.LastBlockHeight() + 1,
 		Hash:               app.LastCommitID().Hash,
 		NextValidatorsHash: valSet.Hash(),
-		Time:               time.Now().UTC(),
 	})
+	require.NoError(t, err)
 	return app
 }
 
@@ -381,7 +386,7 @@ func GenesisStateWithValSet(
 	bondAmt := sdk.DefaultPowerReduction
 
 	for _, val := range valSet.Validators {
-		pk, err := cryptocodec.FromTmPubKeyInterface(val.PubKey)
+		pk, err := cryptocodec.FromCmtPubKeyInterface(val.PubKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert pubkey: %w", err)
 		}
@@ -405,12 +410,22 @@ func GenesisStateWithValSet(
 			MinSelfDelegation: math.ZeroInt(),
 		}
 		validators = append(validators, validator)
-		delegations = append(delegations, stakingtypes.NewDelegation(genAccs[0].GetAddress().String(), val.Address.String(), math.LegacyOneDec()))
+		delegations = append(delegations, stakingtypes.NewDelegation(genAccs[0].GetAddress().String(), sdk.ValAddress(val.Address).String(), math.LegacyOneDec()))
 	}
 
 	// set validators and delegations
 	stakingGenesis := stakingtypes.NewGenesisState(stakingtypes.DefaultParams(), validators, delegations)
 	genesisState[stakingtypes.ModuleName] = codec.MustMarshalJSON(stakingGenesis)
+
+	signingInfos := make([]slashingtypes.SigningInfo, len(valSet.Validators))
+	for i, val := range valSet.Validators {
+		signingInfos[i] = slashingtypes.SigningInfo{
+			Address:              sdk.ConsAddress(val.Address).String(),
+			ValidatorSigningInfo: slashingtypes.ValidatorSigningInfo{},
+		}
+	}
+	slashingGenesis := slashingtypes.NewGenesisState(slashingtypes.DefaultParams(), signingInfos, nil)
+	genesisState[slashingtypes.ModuleName] = codec.MustMarshalJSON(slashingGenesis)
 
 	// add bonded amount to bonded pool module account
 	balances = append(balances, banktypes.Balance{
