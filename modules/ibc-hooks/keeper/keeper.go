@@ -3,7 +3,7 @@ package keeper
 import (
 	"fmt"
 
-	"github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/types"
+	"github.com/cosmos/ibc-apps/modules/ibc-hooks/v8/types"
 
 	storetypes "cosmossdk.io/store/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"

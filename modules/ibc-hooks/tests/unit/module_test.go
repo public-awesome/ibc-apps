@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"testing"
 
-	ibc_hooks "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7"
-	ibchookskeeper "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/keeper"
-	"github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/simapp"
-	"github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/tests/unit/mocks"
+	ibc_hooks "github.com/cosmos/ibc-apps/modules/ibc-hooks/v8"
+	ibchookskeeper "github.com/cosmos/ibc-apps/modules/ibc-hooks/v8/keeper"
+	"github.com/cosmos/ibc-apps/modules/ibc-hooks/v8/simapp"
+	"github.com/cosmos/ibc-apps/modules/ibc-hooks/v8/tests/unit/mocks"
 	"github.com/stretchr/testify/suite"
 
 	_ "embed"

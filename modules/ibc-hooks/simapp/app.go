@@ -49,9 +49,9 @@ import (
 	authsim "github.com/cosmos/cosmos-sdk/x/auth/simulation"
 	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
 	"github.com/cosmos/gogoproto/proto"
-	ibchooks "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7"
-	ibchookskeeper "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/keeper"
-	ibchookstypes "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/types"
+	ibchooks "github.com/cosmos/ibc-apps/modules/ibc-hooks/v8"
+	ibchookskeeper "github.com/cosmos/ibc-apps/modules/ibc-hooks/v8/keeper"
+	ibchookstypes "github.com/cosmos/ibc-apps/modules/ibc-hooks/v8/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cast"
 

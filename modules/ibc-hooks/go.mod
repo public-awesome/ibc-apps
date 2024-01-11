@@ -1,4 +1,4 @@
-module github.com/cosmos/ibc-apps/modules/ibc-hooks/v7
+module github.com/cosmos/ibc-apps/modules/ibc-hooks/v8
 
 go 1.21
 
