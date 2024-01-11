@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"cosmossdk.io/math"
 	ibc_hooks "github.com/cosmos/ibc-apps/modules/ibc-hooks/v8"
 	ibchookskeeper "github.com/cosmos/ibc-apps/modules/ibc-hooks/v8/keeper"
 	"github.com/cosmos/ibc-apps/modules/ibc-hooks/v8/simapp"
@@ -14,7 +15,6 @@ import (
 	_ "embed"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/cosmos/cosmos-sdk/x/auth/types"
 	capabilitytypes "github.com/cosmos/ibc-go/modules/capability/types"
 
 	ibctransfer "github.com/cosmos/ibc-go/v8/modules/apps/transfer"
@@ -37,7 +37,7 @@ type HooksTestSuite struct {
 	Ctx                 sdk.Context
 	EchoContractAddr    sdk.AccAddress
 	CounterContractAddr sdk.AccAddress
-	TestAddress         *types.BaseAccount
+	TestAddress         sdk.AccountI
 }
 
 func TestIBCHooksTestSuite(t *testing.T) {
@@ -46,7 +46,10 @@ func TestIBCHooksTestSuite(t *testing.T) {
 
 func (suite *HooksTestSuite) SetupEnv() {
 	// Setup the environment
-	app, ctx, acc := simapp.Setup(suite.T())
+	app := simapp.Setup(suite.T(), false)
+	ctx := app.BaseApp.NewContext(false)
+	addrs := simapp.AddTestAddrsIncremental(app, ctx, 1, math.NewInt(100000000000000))
+	acc := app.AuthKeeper.GetAccount(ctx, addrs[0])
 
 	// create the echo contract
 	contractID, _, err := app.ContractKeeper.Create(ctx, acc.GetAddress(), counterWasm, nil)
