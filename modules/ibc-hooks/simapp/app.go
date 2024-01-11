@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"cosmossdk.io/client/v2/autocli"
+	"cosmossdk.io/core/appmodule"
 	storetypes "cosmossdk.io/store/types"
 	"cosmossdk.io/x/evidence"
 	evidencekeeper "cosmossdk.io/x/evidence/keeper"
@@ -30,6 +32,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/codec"
 	"github.com/cosmos/cosmos-sdk/codec/types"
 	"github.com/cosmos/cosmos-sdk/runtime"
+	runtimeservices "github.com/cosmos/cosmos-sdk/runtime/services"
 	"github.com/cosmos/cosmos-sdk/server"
 	"github.com/cosmos/cosmos-sdk/server/api"
 	"github.com/cosmos/cosmos-sdk/server/config"
@@ -102,7 +105,6 @@ import (
 	capabilitykeeper "github.com/cosmos/ibc-go/modules/capability/keeper"
 	capabilitytypes "github.com/cosmos/ibc-go/modules/capability/types"
 
-	abci "github.com/cometbft/cometbft/abci/types"
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	tmjson "github.com/cometbft/cometbft/libs/json"
 	dbm "github.com/cosmos/cosmos-db"
@@ -133,14 +135,14 @@ import (
 // DO NOT change the names of these variables!
 // TODO: to prevent other users from changing these variables, we could probably just publish our own package like https://pkg.go.dev/github.com/cosmos/cosmos-sdk/version
 var (
-	// AccountAddressPrefix       = "feath"
-	// AccountPubKeyPrefix        = "feathpub"
-	// ValidatorAddressPrefix     = "feathvaloper"
-	// ValidatorPubKeyPrefix      = "feathvaloperpub"
-	// ConsensusNodeAddressPrefix = "feathvalcons"
-	// ConsensusNodePubKeyPrefix  = "feathvalconspub"
-	BondDenom = "featherstake"
-	AppName   = "feather-core"
+	AccountAddressPrefix       = "feath"
+	AccountPubKeyPrefix        = "feathpub"
+	ValidatorAddressPrefix     = "feathvaloper"
+	ValidatorPubKeyPrefix      = "feathvaloperpub"
+	ConsensusNodeAddressPrefix = "feathvalcons"
+	ConsensusNodePubKeyPrefix  = "feathvalconspub"
+	BondDenom                  = "featherstake"
+	AppName                    = "feather-core"
 )
 
 // TODO: What is this?
@@ -329,10 +331,6 @@ func NewSimApp(
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
 	)
 
-	defer func() { // TODO: Does deferring this even work?
-		app.AuthKeeper.GetModulePermissions()[authtypes.FeeCollectorName] = authtypes.NewPermissionsForAddress(authtypes.FeeCollectorName, nil) // This implicitly creates a module account
-		app.BankKeeper.GetBlockedAddresses()[authtypes.NewModuleAddress(authtypes.FeeCollectorName).String()] = true
-	}()
 	modules = append(modules, auth.NewAppModule(cdc, app.AuthKeeper, nil, nil))
 	simModules = append(simModules, auth.NewAppModule(cdc, app.AuthKeeper, authsim.RandomGenesisAccounts, nil))
 
@@ -441,9 +439,7 @@ func NewSimApp(
 	// 'staking' module - depends on
 	// 1. 'auth'
 	// 2. 'bank'
-	app.AuthKeeper.GetModulePermissions()[stakingtypes.BondedPoolName] = authtypes.NewPermissionsForAddress(stakingtypes.BondedPoolName, []string{authtypes.Burner, authtypes.Staking})
 	app.BankKeeper.GetBlockedAddresses()[authtypes.NewModuleAddress(stakingtypes.BondedPoolName).String()] = true
-	app.AuthKeeper.GetModulePermissions()[stakingtypes.NotBondedPoolName] = authtypes.NewPermissionsForAddress(stakingtypes.NotBondedPoolName, []string{authtypes.Burner, authtypes.Staking})
 	app.BankKeeper.GetBlockedAddresses()[authtypes.NewModuleAddress(stakingtypes.NotBondedPoolName).String()] = true
 	app.keys[stakingtypes.StoreKey] = storetypes.NewKVStoreKey(stakingtypes.StoreKey)
 	app.StakingKeeper = stakingkeeper.NewKeeper(
@@ -464,7 +460,6 @@ func NewSimApp(
 	// 1. 'staking'
 	// 2. 'auth'
 	// 3. 'bank'
-	app.AuthKeeper.GetModulePermissions()[minttypes.ModuleName] = authtypes.NewPermissionsForAddress(minttypes.ModuleName, []string{authtypes.Minter})
 	app.BankKeeper.GetBlockedAddresses()[authtypes.NewModuleAddress(minttypes.ModuleName).String()] = true
 	app.keys[minttypes.StoreKey] = storetypes.NewKVStoreKey(minttypes.StoreKey)
 	app.MintKeeper = mintkeeper.NewKeeper(
@@ -482,7 +477,6 @@ func NewSimApp(
 	// 'nft' module - depends on
 	// 1. 'auth'
 	// 2. 'bank'
-	app.AuthKeeper.GetModulePermissions()[nft.ModuleName] = authtypes.NewPermissionsForAddress(nft.ModuleName, nil)
 	app.BankKeeper.GetBlockedAddresses()[authtypes.NewModuleAddress(nft.ModuleName).String()] = true
 	app.keys[nftkeeper.StoreKey] = storetypes.NewKVStoreKey(nftkeeper.StoreKey)
 	app.NftKeeper = nftkeeper.NewKeeper(
@@ -524,7 +518,6 @@ func NewSimApp(
 	// 1. 'auth'
 	// 2. 'bank'
 	// 3. 'staking'
-	app.AuthKeeper.GetModulePermissions()[govtypes.ModuleName] = authtypes.NewPermissionsForAddress(govtypes.ModuleName, []string{authtypes.Burner})
 	app.keys[govtypes.StoreKey] = storetypes.NewKVStoreKey(govtypes.StoreKey)
 	app.GovKeeper = *govkeeper.NewKeeper(
 		cdc,
@@ -549,7 +542,6 @@ func NewSimApp(
 	// 2. 'bank'
 	// 3. 'staking'
 	// 4. 'gov'
-	app.AuthKeeper.GetModulePermissions()[distrtypes.ModuleName] = authtypes.NewPermissionsForAddress(distrtypes.ModuleName, nil)
 	app.BankKeeper.GetBlockedAddresses()[authtypes.NewModuleAddress(distrtypes.ModuleName).String()] = true
 	app.keys[distrtypes.StoreKey] = storetypes.NewKVStoreKey(distrtypes.StoreKey)
 	app.DistrKeeper = distrkeeper.NewKeeper(
@@ -643,7 +635,6 @@ func NewSimApp(
 		app.BankKeeper,
 	)
 	app.keys[ibcporttypes.StoreKey] = storetypes.NewKVStoreKey(ibcporttypes.StoreKey)
-	app.AuthKeeper.GetModulePermissions()[ibctransfertypes.ModuleName] = authtypes.NewPermissionsForAddress(ibcfeetypes.ModuleName, nil)
 	icaHostIBCModule := icahost.NewIBCModule(app.ICAHostKeeper)
 	icaHostStack := ibcfee.NewIBCMiddleware(icaHostIBCModule, app.IBCFeeKeeper)
 
@@ -678,7 +669,6 @@ func NewSimApp(
 	// 2. 'auth'
 	// 3. 'bank'
 	// 4. 'capability'
-	app.AuthKeeper.GetModulePermissions()[ibctransfertypes.ModuleName] = authtypes.NewPermissionsForAddress(ibctransfertypes.ModuleName, []string{authtypes.Minter, authtypes.Burner})
 	app.BankKeeper.GetBlockedAddresses()[authtypes.NewModuleAddress(ibctransfertypes.ModuleName).String()] = true
 	app.keys[ibctransfertypes.StoreKey] = storetypes.NewKVStoreKey(ibctransfertypes.StoreKey)
 	app.TransferKeeper = ibctransferkeeper.NewKeeper(
@@ -697,7 +687,6 @@ func NewSimApp(
 	simModules = append(simModules, ibctransfer.NewAppModule(app.TransferKeeper))
 
 	// 'ica'
-	app.AuthKeeper.GetModulePermissions()[icatypes.ModuleName] = authtypes.NewPermissionsForAddress(icatypes.ModuleName, nil)
 	app.BankKeeper.GetBlockedAddresses()[authtypes.NewModuleAddress(icatypes.ModuleName).String()] = true
 
 	// 'icacontroller' module - depends on
@@ -734,7 +723,6 @@ func NewSimApp(
 		app.MsgServiceRouter(),
 		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
 	)
-	// app.IBCKeeper.Router.AddRoute(icahosttypes.SubModuleName, icahost.NewIBCModule(app.ICAHostKeeper))
 	modules = append(modules, ica.NewAppModule(&icaControllerKeeper, &app.ICAHostKeeper))
 	simModules = append(simModules, ica.NewAppModule(&icaControllerKeeper, &app.ICAHostKeeper))
 
@@ -747,7 +735,6 @@ func NewSimApp(
 	// 6. 'capability'
 	// 7. 'ibc'
 	// 8. 'ibctransfer'
-	app.AuthKeeper.GetModulePermissions()[wasmtypes.ModuleName] = authtypes.NewPermissionsForAddress(wasmtypes.ModuleName, []string{authtypes.Burner})
 	app.BankKeeper.GetBlockedAddresses()[authtypes.NewModuleAddress(wasmtypes.ModuleName).String()] = true
 	app.keys[wasmtypes.StoreKey] = storetypes.NewKVStoreKey(wasmtypes.StoreKey)
 	wasmConfig, err := wasm.ReadWasmConfig(appOpts)
@@ -988,7 +975,7 @@ func GetWasmOpts(app *App, appOpts servertypes.AppOptions) []wasm.Option {
 // Name returns the name of the App
 func (app *App) Name() string { return app.BaseApp.Name() }
 
-func (app *App) PreBlocker(ctx sdk.Context, _ *abci.RequestFinalizeBlock) (*sdk.ResponsePreBlock, error) {
+func (app *App) PreBlocker(ctx sdk.Context, _ *abcitypes.RequestFinalizeBlock) (*sdk.ResponsePreBlock, error) {
 	return app.ModuleManager.PreBlock(ctx)
 }
 
@@ -1100,4 +1087,25 @@ func BlockedAddresses() map[string]bool {
 	delete(modAccAddrs, authtypes.NewModuleAddress(govtypes.ModuleName).String())
 
 	return modAccAddrs
+}
+
+// AutoCliOpts returns the autocli options for the app.
+func (app *App) AutoCliOpts() autocli.AppOptions {
+	modules := make(map[string]appmodule.AppModule, 0)
+	for _, m := range app.ModuleManager.Modules {
+		if moduleWithName, ok := m.(module.HasName); ok {
+			moduleName := moduleWithName.Name()
+			if appModule, ok := moduleWithName.(appmodule.AppModule); ok {
+				modules[moduleName] = appModule
+			}
+		}
+	}
+
+	return autocli.AppOptions{
+		Modules:               modules,
+		ModuleOptions:         runtimeservices.ExtractAutoCLIOptions(app.ModuleManager.Modules),
+		AddressCodec:          authcodec.NewBech32Codec(sdk.GetConfig().GetBech32AccountAddrPrefix()),
+		ValidatorAddressCodec: authcodec.NewBech32Codec(sdk.GetConfig().GetBech32ValidatorAddrPrefix()),
+		ConsensusAddressCodec: authcodec.NewBech32Codec(sdk.GetConfig().GetBech32ConsensusAddrPrefix()),
+	}
 }

@@ -37,8 +37,6 @@ import (
 	simcli "github.com/cosmos/cosmos-sdk/x/simulation/client/cli"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 
-	slashingtypes "github.com/cosmos/cosmos-sdk/x/slashing/types"
-
 	abci "github.com/cometbft/cometbft/abci/types"
 	tmjson "github.com/cometbft/cometbft/libs/json"
 	dbm "github.com/cosmos/cosmos-db"
@@ -397,13 +395,15 @@ func GenesisStateWithValSet(
 		}
 
 		validator := stakingtypes.Validator{
-			OperatorAddress:   sdk.ValAddress(val.Address).String(),
-			ConsensusPubkey:   pkAny,
-			Jailed:            false,
-			Status:            stakingtypes.Bonded,
-			Tokens:            bondAmt,
-			DelegatorShares:   math.LegacyOneDec(),
-			Description:       stakingtypes.Description{},
+			OperatorAddress: sdk.ValAddress(val.Address).String(),
+			ConsensusPubkey: pkAny,
+			Jailed:          false,
+			Status:          stakingtypes.Bonded,
+			Tokens:          bondAmt,
+			DelegatorShares: math.LegacyOneDec(),
+			Description: stakingtypes.Description{
+				Moniker: "test",
+			},
 			UnbondingHeight:   int64(0),
 			UnbondingTime:     time.Unix(0, 0).UTC(),
 			Commission:        stakingtypes.NewCommission(math.LegacyZeroDec(), math.LegacyZeroDec(), math.LegacyZeroDec()),
@@ -416,16 +416,6 @@ func GenesisStateWithValSet(
 	// set validators and delegations
 	stakingGenesis := stakingtypes.NewGenesisState(stakingtypes.DefaultParams(), validators, delegations)
 	genesisState[stakingtypes.ModuleName] = codec.MustMarshalJSON(stakingGenesis)
-
-	signingInfos := make([]slashingtypes.SigningInfo, len(valSet.Validators))
-	for i, val := range valSet.Validators {
-		signingInfos[i] = slashingtypes.SigningInfo{
-			Address:              sdk.ConsAddress(val.Address).String(),
-			ValidatorSigningInfo: slashingtypes.ValidatorSigningInfo{},
-		}
-	}
-	slashingGenesis := slashingtypes.NewGenesisState(slashingtypes.DefaultParams(), signingInfos, nil)
-	genesisState[slashingtypes.ModuleName] = codec.MustMarshalJSON(slashingGenesis)
 
 	// add bonded amount to bonded pool module account
 	balances = append(balances, banktypes.Balance{
