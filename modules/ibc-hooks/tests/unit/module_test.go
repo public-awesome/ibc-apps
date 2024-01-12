@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"cosmossdk.io/math"
 	ibc_hooks "github.com/cosmos/ibc-apps/modules/ibc-hooks/v8"
@@ -47,7 +48,7 @@ func TestIBCHooksTestSuite(t *testing.T) {
 func (suite *HooksTestSuite) SetupEnv() {
 	// Setup the environment
 	app := simapp.Setup(suite.T(), false)
-	ctx := app.BaseApp.NewContext(false)
+	ctx := app.BaseApp.NewContext(false).WithBlockTime(time.Now().UTC())
 	addrs := simapp.AddTestAddrsIncremental(app, ctx, 1, math.NewInt(100000000000000))
 	acc := app.AuthKeeper.GetAccount(ctx, addrs[0])
 
