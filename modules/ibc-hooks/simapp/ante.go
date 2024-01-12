@@ -4,16 +4,18 @@ import (
 	wasmkeeper "github.com/CosmWasm/wasmd/x/wasm/keeper"
 	wasmTypes "github.com/CosmWasm/wasmd/x/wasm/types"
 
+	corestoretypes "cosmossdk.io/core/store"
 	errors "cosmossdk.io/errors"
+	circuitante "cosmossdk.io/x/circuit/ante"
+	circuitkeeper "cosmossdk.io/x/circuit/keeper"
 
 	"github.com/cosmos/cosmos-sdk/codec"
-	storetypes "github.com/cosmos/cosmos-sdk/store/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	"github.com/cosmos/cosmos-sdk/x/auth/ante"
 
-	ibcante "github.com/cosmos/ibc-go/v7/modules/core/ante"
-	ibckeeper "github.com/cosmos/ibc-go/v7/modules/core/keeper"
+	ibcante "github.com/cosmos/ibc-go/v8/modules/core/ante"
+	ibckeeper "github.com/cosmos/ibc-go/v8/modules/core/keeper"
 )
 
 // HandlerOptions extends the SDK's AnteHandler options by requiring the IBC
@@ -21,10 +23,11 @@ import (
 type HandlerOptions struct {
 	ante.HandlerOptions
 
-	IBCKeeper         *ibckeeper.Keeper
-	TxCounterStoreKey storetypes.StoreKey
-	WasmConfig        wasmTypes.WasmConfig
-	Cdc               codec.BinaryCodec
+	IBCKeeper             *ibckeeper.Keeper
+	TXCounterStoreService corestoretypes.KVStoreService
+	WasmConfig            wasmTypes.WasmConfig
+	Cdc                   codec.BinaryCodec
+	CircuitKeeper         *circuitkeeper.Keeper
 }
 
 // NewAnteHandler returns an AnteHandler that checks and increments sequence
@@ -43,10 +46,19 @@ func NewAnteHandler(options HandlerOptions) (sdk.AnteHandler, error) {
 		return nil, errors.Wrap(sdkerrors.ErrLogic, "sign mode handler is required for ante builder")
 	}
 
+	if options.TXCounterStoreService == nil {
+		return nil, errors.Wrap(sdkerrors.ErrLogic, "wasm store service is required for ante builder")
+	}
+
+	if options.CircuitKeeper == nil {
+		return nil, errors.Wrap(sdkerrors.ErrLogic, "circuit keeper is required for ante builder")
+	}
+
 	anteDecorators := []sdk.AnteDecorator{
 		ante.NewSetUpContextDecorator(), // outermost AnteDecorator. SetUpContext must be called first
 		wasmkeeper.NewLimitSimulationGasDecorator(options.WasmConfig.SimulationGasLimit),
-		wasmkeeper.NewCountTXDecorator(options.TxCounterStoreKey),
+		wasmkeeper.NewCountTXDecorator(options.TXCounterStoreService),
+		circuitante.NewCircuitBreakerDecorator(options.CircuitKeeper),
 		ante.NewExtensionOptionsDecorator(options.ExtensionOptionChecker),
 		ante.NewValidateBasicDecorator(),
 		ante.NewTxTimeoutHeightDecorator(),

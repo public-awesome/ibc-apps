@@ -4,24 +4,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
-	ibc_hooks "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7"
-	ibchookskeeper "github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/keeper"
-	"github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/simapp"
-	"github.com/cosmos/ibc-apps/modules/ibc-hooks/v7/tests/unit/mocks"
+	"cosmossdk.io/math"
+	ibc_hooks "github.com/cosmos/ibc-apps/modules/ibc-hooks/v8"
+	ibchookskeeper "github.com/cosmos/ibc-apps/modules/ibc-hooks/v8/keeper"
+	"github.com/cosmos/ibc-apps/modules/ibc-hooks/v8/simapp"
+	"github.com/cosmos/ibc-apps/modules/ibc-hooks/v8/tests/unit/mocks"
 	"github.com/stretchr/testify/suite"
 
 	_ "embed"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/cosmos/cosmos-sdk/x/auth/types"
-	capabilitytypes "github.com/cosmos/cosmos-sdk/x/capability/types"
+	capabilitytypes "github.com/cosmos/ibc-go/modules/capability/types"
 
-	ibctransfer "github.com/cosmos/ibc-go/v7/modules/apps/transfer"
-	transfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
-	ibcclienttypes "github.com/cosmos/ibc-go/v7/modules/core/02-client/types"
-	channeltypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
-	ibcmock "github.com/cosmos/ibc-go/v7/testing/mock"
+	ibctransfer "github.com/cosmos/ibc-go/v8/modules/apps/transfer"
+	transfertypes "github.com/cosmos/ibc-go/v8/modules/apps/transfer/types"
+	ibcclienttypes "github.com/cosmos/ibc-go/v8/modules/core/02-client/types"
+	channeltypes "github.com/cosmos/ibc-go/v8/modules/core/04-channel/types"
+	ibcmock "github.com/cosmos/ibc-go/v8/testing/mock"
 )
 
 //go:embed testdata/counter/artifacts/counter.wasm
@@ -37,7 +38,7 @@ type HooksTestSuite struct {
 	Ctx                 sdk.Context
 	EchoContractAddr    sdk.AccAddress
 	CounterContractAddr sdk.AccAddress
-	TestAddress         *types.BaseAccount
+	TestAddress         sdk.AccountI
 }
 
 func TestIBCHooksTestSuite(t *testing.T) {
@@ -46,7 +47,10 @@ func TestIBCHooksTestSuite(t *testing.T) {
 
 func (suite *HooksTestSuite) SetupEnv() {
 	// Setup the environment
-	app, ctx, acc := simapp.Setup(suite.T())
+	app := simapp.Setup(suite.T(), false)
+	ctx := app.BaseApp.NewContext(false).WithBlockTime(time.Now().UTC())
+	addrs := simapp.AddTestAddrsIncremental(app, ctx, 1, math.NewInt(100000000000000))
+	acc := app.AuthKeeper.GetAccount(ctx, addrs[0])
 
 	// create the echo contract
 	contractID, _, err := app.ContractKeeper.Create(ctx, acc.GetAddress(), counterWasm, nil)
