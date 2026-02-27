@@ -26,10 +26,15 @@ type ContractAck struct {
 	IbcAck         []byte `json:"ibc_ack"`
 }
 
+type PauseChecker interface {
+	IsExecutionPaused(ctx sdk.Context, contractAddr sdk.AccAddress) bool
+}
+
 type WasmHooks struct {
 	ContractKeeper      *wasmkeeper.Keeper
 	ibcHooksKeeper      *keeper.Keeper
 	bech32PrefixAccAddr string
+	pauseChecker        PauseChecker
 }
 
 func NewWasmHooks(ibcHooksKeeper *keeper.Keeper, contractKeeper *wasmkeeper.Keeper, bech32PrefixAccAddr string) WasmHooks {
@@ -38,6 +43,10 @@ func NewWasmHooks(ibcHooksKeeper *keeper.Keeper, contractKeeper *wasmkeeper.Keep
 		ibcHooksKeeper:      ibcHooksKeeper,
 		bech32PrefixAccAddr: bech32PrefixAccAddr,
 	}
+}
+
+func (h *WasmHooks) SetPauseChecker(pauseChecker PauseChecker) {
+	h.pauseChecker = pauseChecker
 }
 
 func (h WasmHooks) ProperlyConfigured() bool {
@@ -110,6 +119,9 @@ func (h WasmHooks) OnRecvPacketOverride(im IBCMiddleware, ctx sdk.Context, packe
 		Contract: contractAddr.String(),
 		Msg:      msgBytes,
 		Funds:    funds,
+	}
+	if h.pauseChecker != nil && h.pauseChecker.IsExecutionPaused(ctx, contractAddr) {
+		return NewEmitErrorAcknowledgement(ctx, types.ErrWasmError, "contract is paused")
 	}
 	response, err := h.execWasmMsg(ctx, &execMsg)
 	if err != nil {
@@ -308,6 +320,9 @@ func (h WasmHooks) OnAcknowledgementPacketOverride(im IBCMiddleware, ctx sdk.Con
 	sudoMsg := []byte(fmt.Sprintf(
 		`{"ibc_lifecycle_complete": {"ibc_ack": {"channel": "%s", "sequence": %d, "ack": %s, "success": %s}}}`,
 		packet.SourceChannel, packet.Sequence, ackAsJson, success))
+	if h.pauseChecker != nil && h.pauseChecker.IsExecutionPaused(ctx, contractAddr) {
+		return errors.Wrap(types.ErrWasmError, "Ack callback error: contract is paused")
+	}
 	_, err = h.ContractKeeper.Sudo(ctx, contractAddr, sudoMsg)
 	if err != nil {
 		// error processing the callback
@@ -343,6 +358,9 @@ func (h WasmHooks) OnTimeoutPacketOverride(im IBCMiddleware, ctx sdk.Context, pa
 	sudoMsg := []byte(fmt.Sprintf(
 		`{"ibc_lifecycle_complete": {"ibc_timeout": {"channel": "%s", "sequence": %d}}}`,
 		packet.SourceChannel, packet.Sequence))
+	if h.pauseChecker != nil && h.pauseChecker.IsExecutionPaused(ctx, contractAddr) {
+		return errors.Wrap(types.ErrWasmError, "Timeout callback error: contract is paused")
+	}
 	_, err = h.ContractKeeper.Sudo(ctx, contractAddr, sudoMsg)
 	if err != nil {
 		// error processing the callback. This could be because the contract doesn't implement the message type to

@@ -40,6 +40,14 @@ type HooksTestSuite struct {
 	TestAddress         *types.BaseAccount
 }
 
+type mockPauseChecker struct {
+	paused map[string]bool
+}
+
+func (m mockPauseChecker) IsExecutionPaused(_ sdk.Context, contractAddr sdk.AccAddress) bool {
+	return m.paused[contractAddr.String()]
+}
+
 func TestIBCHooksTestSuite(t *testing.T) {
 	suite.Run(t, new(HooksTestSuite))
 }
@@ -224,6 +232,60 @@ func (suite *HooksTestSuite) TestOnRecvPacketCounterContract() {
 	)
 	suite.NoError(err)
 	suite.Equal(`{"count":1}`, string(count))
+}
+
+func (suite *HooksTestSuite) TestOnRecvPacketPausedContractRejected() {
+	suite.SetupEnv()
+
+	recvPacket := channeltypes.Packet{
+		Data: transfertypes.FungibleTokenPacketData{
+			Denom:    "transfer/channel-0/stake",
+			Amount:   "1",
+			Sender:   suite.TestAddress.GetAddress().String(),
+			Receiver: suite.CounterContractAddr.String(),
+			Memo:     fmt.Sprintf(`{"wasm":{"contract": "%s", "msg":{"increment":{}}}}`, suite.CounterContractAddr.String()),
+		}.GetBytes(),
+		SourcePort:    "transfer",
+		SourceChannel: "channel-0",
+	}
+
+	escrowAddress := transfertypes.GetEscrowAddress(recvPacket.GetDestPort(), recvPacket.GetDestChannel())
+	testEscrowAmount := sdk.NewInt64Coin("stake", 2)
+	err := suite.App.BankKeeper.SendCoins(suite.Ctx, suite.TestAddress.GetAddress(), escrowAddress, sdk.NewCoins(testEscrowAmount))
+	suite.NoError(err)
+
+	if transferKeeper, ok := any(&suite.App.TransferKeeper).(TransferKeeperWithTotalEscrowTracking); ok {
+		transferKeeper.SetTotalEscrowForDenom(suite.Ctx, testEscrowAmount)
+	}
+
+	wasmHooks := ibc_hooks.NewWasmHooks(
+		&suite.App.IBCHooksKeeper,
+		&suite.App.WasmKeeper,
+		"cosmos",
+	)
+	wasmHooks.SetPauseChecker(mockPauseChecker{
+		paused: map[string]bool{suite.CounterContractAddr.String(): true},
+	})
+
+	ics4Middleware := ibc_hooks.NewICS4Middleware(
+		suite.App.IBCKeeper.ChannelKeeper,
+		wasmHooks,
+	)
+	transferIBCModule := ibctransfer.NewIBCModule(suite.App.TransferKeeper)
+	ibcmiddleware := ibc_hooks.NewIBCMiddleware(
+		transferIBCModule,
+		&ics4Middleware,
+	)
+
+	res := ibcmiddleware.OnRecvPacket(suite.Ctx, recvPacket, suite.TestAddress.GetAddress())
+	suite.False(res.Success())
+
+	// Error ack is what triggers refund handling on sender side.
+	var ack map[string]any
+	err = json.Unmarshal(res.Acknowledgement(), &ack)
+	suite.NoError(err)
+	_, hasError := ack["error"]
+	suite.True(hasError)
 }
 
 func (suite *HooksTestSuite) TestOnAcknowledgementPacketCounterContract() {
@@ -422,6 +484,161 @@ func (suite *HooksTestSuite) TestOnTimeoutPacketOverrideCounterContract() {
 	)
 	suite.NoError(err)
 	suite.Equal(`{"count":10}`, string(count))
+}
+
+func (suite *HooksTestSuite) TestOnAcknowledgementPacketPausedContractCallbackRejectedAndRetained() {
+	suite.SetupEnv()
+
+	callbackPacket := channeltypes.Packet{
+		Data: transfertypes.FungibleTokenPacketData{
+			Denom:    "transfer/channel-0/stake",
+			Amount:   "1",
+			Sender:   suite.TestAddress.GetAddress().String(),
+			Receiver: suite.CounterContractAddr.String(),
+			Memo:     fmt.Sprintf(`{"ibc_callback": "%s"}`, suite.CounterContractAddr),
+		}.GetBytes(),
+		Sequence:      1,
+		SourcePort:    "transfer",
+		SourceChannel: "channel-0",
+	}
+
+	escrowAddress := transfertypes.GetEscrowAddress(callbackPacket.GetDestPort(), callbackPacket.GetDestChannel())
+	testEscrowAmount := sdk.NewInt64Coin("stake", 2)
+	err := suite.App.BankKeeper.SendCoins(suite.Ctx, suite.TestAddress.GetAddress(), escrowAddress, sdk.NewCoins(testEscrowAmount))
+	suite.NoError(err)
+	if transferKeeper, ok := any(&suite.App.TransferKeeper).(TransferKeeperWithTotalEscrowTracking); ok {
+		transferKeeper.SetTotalEscrowForDenom(suite.Ctx, testEscrowAmount)
+	}
+
+	wasmHooks := ibc_hooks.NewWasmHooks(
+		&suite.App.IBCHooksKeeper,
+		&suite.App.WasmKeeper,
+		"cosmos",
+	)
+	wasmHooks.SetPauseChecker(mockPauseChecker{
+		paused: map[string]bool{suite.CounterContractAddr.String(): true},
+	})
+
+	ics4Middleware := ibc_hooks.NewICS4Middleware(
+		&mocks.ICS4WrapperMock{},
+		wasmHooks,
+	)
+	transferIBCModule := ibctransfer.NewIBCModule(suite.App.TransferKeeper)
+	ibcmiddleware := ibc_hooks.NewIBCMiddleware(transferIBCModule, &ics4Middleware)
+
+	seq, err := ibcmiddleware.SendPacket(
+		suite.Ctx,
+		&capabilitytypes.Capability{Index: 1},
+		callbackPacket.SourcePort,
+		callbackPacket.SourceChannel,
+		ibcclienttypes.Height{RevisionNumber: 1, RevisionHeight: 1},
+		1,
+		callbackPacket.Data,
+	)
+	suite.NoError(err)
+	suite.Equal(uint64(1), seq)
+
+	recvPacket := channeltypes.Packet{
+		Data: transfertypes.FungibleTokenPacketData{
+			Denom:    "transfer/channel-0/stake",
+			Amount:   "1",
+			Sender:   suite.TestAddress.GetAddress().String(),
+			Receiver: suite.CounterContractAddr.String(),
+			Memo:     fmt.Sprintf(`{"wasm":{"contract": "%s", "msg":{"increment":{}}}}`, suite.CounterContractAddr.String()),
+		}.GetBytes(),
+		Sequence:      1,
+		SourcePort:    "transfer",
+		SourceChannel: "channel-0",
+	}
+	err = wasmHooks.OnAcknowledgementPacketOverride(
+		ibcmiddleware,
+		suite.Ctx,
+		recvPacket,
+		ibcmock.MockAcknowledgement.Acknowledgement(),
+		suite.TestAddress.GetAddress(),
+	)
+	suite.Error(err)
+	suite.Contains(err.Error(), "contract is paused")
+
+	stored := suite.App.IBCHooksKeeper.GetPacketCallback(suite.Ctx, recvPacket.GetSourceChannel(), recvPacket.GetSequence())
+	suite.Equal(suite.CounterContractAddr.String(), stored)
+}
+
+func (suite *HooksTestSuite) TestOnTimeoutPacketPausedContractCallbackRejectedAndRetained() {
+	suite.SetupEnv()
+
+	callbackPacket := channeltypes.Packet{
+		Data: transfertypes.FungibleTokenPacketData{
+			Denom:    "transfer/channel-0/stake",
+			Amount:   "1",
+			Sender:   suite.TestAddress.GetAddress().String(),
+			Receiver: suite.CounterContractAddr.String(),
+			Memo:     fmt.Sprintf(`{"ibc_callback": "%s"}`, suite.CounterContractAddr),
+		}.GetBytes(),
+		Sequence:      1,
+		SourcePort:    "transfer",
+		SourceChannel: "channel-0",
+	}
+
+	escrowAddress := transfertypes.GetEscrowAddress(callbackPacket.GetDestPort(), callbackPacket.GetDestChannel())
+	testEscrowAmount := sdk.NewInt64Coin("stake", 2)
+	err := suite.App.BankKeeper.SendCoins(suite.Ctx, suite.TestAddress.GetAddress(), escrowAddress, sdk.NewCoins(testEscrowAmount))
+	suite.NoError(err)
+	if transferKeeper, ok := any(&suite.App.TransferKeeper).(TransferKeeperWithTotalEscrowTracking); ok {
+		transferKeeper.SetTotalEscrowForDenom(suite.Ctx, testEscrowAmount)
+	}
+
+	wasmHooks := ibc_hooks.NewWasmHooks(
+		&suite.App.IBCHooksKeeper,
+		&suite.App.WasmKeeper,
+		"cosmos",
+	)
+	wasmHooks.SetPauseChecker(mockPauseChecker{
+		paused: map[string]bool{suite.CounterContractAddr.String(): true},
+	})
+
+	ics4Middleware := ibc_hooks.NewICS4Middleware(
+		&mocks.ICS4WrapperMock{},
+		wasmHooks,
+	)
+	transferIBCModule := ibctransfer.NewIBCModule(suite.App.TransferKeeper)
+	ibcmiddleware := ibc_hooks.NewIBCMiddleware(transferIBCModule, &ics4Middleware)
+
+	seq, err := ibcmiddleware.SendPacket(
+		suite.Ctx,
+		&capabilitytypes.Capability{Index: 1},
+		callbackPacket.SourcePort,
+		callbackPacket.SourceChannel,
+		ibcclienttypes.Height{RevisionNumber: 1, RevisionHeight: 1},
+		1,
+		callbackPacket.Data,
+	)
+	suite.NoError(err)
+	suite.Equal(uint64(1), seq)
+
+	recvPacket := channeltypes.Packet{
+		Data: transfertypes.FungibleTokenPacketData{
+			Denom:    "transfer/channel-0/stake",
+			Amount:   "1",
+			Sender:   suite.TestAddress.GetAddress().String(),
+			Receiver: suite.CounterContractAddr.String(),
+			Memo:     fmt.Sprintf(`{"wasm":{"contract": "%s", "msg":{"increment":{}}}}`, suite.CounterContractAddr.String()),
+		}.GetBytes(),
+		Sequence:      1,
+		SourcePort:    "transfer",
+		SourceChannel: "channel-0",
+	}
+	err = wasmHooks.OnTimeoutPacketOverride(
+		ibcmiddleware,
+		suite.Ctx,
+		recvPacket,
+		suite.TestAddress.GetAddress(),
+	)
+	suite.Error(err)
+	suite.Contains(err.Error(), "contract is paused")
+
+	stored := suite.App.IBCHooksKeeper.GetPacketCallback(suite.Ctx, recvPacket.GetSourceChannel(), recvPacket.GetSequence())
+	suite.Equal(suite.CounterContractAddr.String(), stored)
 }
 
 // TransferKeeperWithTotalEscrowTracking defines an interface to check for existing methods
